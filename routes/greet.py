@@ -6,7 +6,6 @@ from pypdf import PdfReader
 import numpy as np
 import pdb;
 
-
 router = APIRouter(prefix="/greet")
 
 
@@ -48,13 +47,19 @@ async def upload_data(file: UploadFile = File(...)):
 
     embeddings_store = []  # reset
 
-    for chunk in chunks:
+    # for chunk in chunks:
+    #     emb = get_embedding(chunk)
+    #     embeddings_store.append({
+    #         "text": chunk,
+    #         "vector": emb
+    #     })
+    for idx, chunk in enumerate(chunks):
         emb = get_embedding(chunk)
         embeddings_store.append({
             "text": chunk,
-            "vector": emb
+            "vector": emb,
+            "index": idx
         })
-
 
     return {
         "filename": file.filename,
@@ -62,7 +67,7 @@ async def upload_data(file: UploadFile = File(...)):
     }
 
 
-def chunk_text(text, chunk_size=500, overlap=100):
+def chunk_text(text, chunk_size=1000, overlap=200):
     chunks = []
     for i in range(0, len(text), chunk_size - overlap):
         chunks.append(text[i:i + chunk_size])
@@ -81,31 +86,57 @@ async def ask_question(query: str):
     if not embeddings_store:
         return {"error": "No document uploaded yet"}
     results = search(query, embeddings_store)
+    # top_chunks = [text for score, text in results]
+    selected_indices = [idx for score, idx in results]
 
-    top_chunks = [text for score, text in results]
+    context_chunks = []
 
-    answer = generate_answer(query, top_chunks)
+    for idx in selected_indices:
+        for neighbor in [idx - 1, idx, idx + 1]:
+            if 0 <= neighbor < len(embeddings_store):
+                context_chunks.append(embeddings_store[neighbor]["text"])
+    context_chunks = list(dict.fromkeys(context_chunks))
+    answer = generate_answer(query, context_chunks)
+
+    # answer = generate_answer(query, top_chunks)
 
     return {
         "question": query,
-        "answer": answer,
-        "sources": top_chunks
+        "answer": answer
+        # "sources": top_chunks
     }
 
 
 def search(query, embeddings_store):
-    pdb.set_trace()
     query_vec = get_embedding(query)
+    query_lower = query.lower()
 
     results = []
 
     for item in embeddings_store:
+        text = item["text"]
+        text_lower = text.lower()
+
+        # Base semantic score
         score = cosine_similarity(query_vec, item["vector"])
-        results.append((score, item["text"]))
 
-    results.sort(reverse=True)
+        # 🔥 Full phrase boost (strong signal)
+        if query_lower in text_lower:
+            score += 0.5
 
-    return results[:3]  # top 3 chunks
+        # 🔥 Keyword boost (medium signal)
+        keywords = query_lower.split()
+        for word in keywords:
+            if word in text_lower:
+                score += 0.2
+
+        # results.append((score, text))
+        results.append((score, item["index"]))
+    # Sort by highest score
+    results.sort(key=lambda x: x[0], reverse=True)
+
+    # Return top chunks
+    return results[:20]
 
 
 def cosine_similarity(a, b):
@@ -117,7 +148,8 @@ def generate_answer(query: str, context_chunks: list):
 
     prompt = f"""You are a helpful assistant.
                 Answer the question ONLY using the context below.
-                Use ONLY the provided context to answer.
+                Use the provided context primarily.
+                If partial information is available, answer as completely as possible..
                 If the answer is not in the context, say "I don't know".
                 Be concise and accurate..
 
@@ -133,5 +165,3 @@ def generate_answer(query: str, context_chunks: list):
         ]
     )
     return response["message"]["content"]
-
-
