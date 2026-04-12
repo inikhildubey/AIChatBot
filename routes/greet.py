@@ -1,12 +1,13 @@
 import io
-import ollama
 
+import numpy as np
+import ollama
 from fastapi import APIRouter, UploadFile, File
 from pypdf import PdfReader
-import numpy as np
-import pdb;
+
 
 router = APIRouter(prefix="/greet")
+embeddings_store = []
 
 
 @router.get("/")
@@ -14,21 +15,6 @@ def greet_welcome(name: str):
     return {"message": f"Welcome to the Greet Module {name}"}
 
 
-# @router.post("/upload")
-# async def upload_data(req: Request):
-#     """ Post Method run without define Pydentic from request data"""
-#     body = await req.json()
-#     return body
-
-# async def upload_data(file: UploadFile = File(...)):
-#     content = await file.read()
-#     pdf = PdfReader(io.BytesIO(content))
-#
-#     text = ""
-#     for page in pdf.pages:
-#         text += page.extract_text() or ""
-#     return {"filename": file.filename, "size": len(text), "size1": len(content), "content": f"{text}"}
-embeddings_store = []
 
 
 @router.post("/upload")
@@ -47,12 +33,6 @@ async def upload_data(file: UploadFile = File(...)):
 
     embeddings_store = []  # reset
 
-    # for chunk in chunks:
-    #     emb = get_embedding(chunk)
-    #     embeddings_store.append({
-    #         "text": chunk,
-    #         "vector": emb
-    #     })
     for idx, chunk in enumerate(chunks):
         emb = get_embedding(chunk)
         embeddings_store.append({
@@ -60,7 +40,6 @@ async def upload_data(file: UploadFile = File(...)):
             "vector": emb,
             "index": idx
         })
-
     return {
         "filename": file.filename,
         "chunks": len(chunks)
@@ -85,8 +64,7 @@ async def ask_question(query: str):
     global embeddings_store
     if not embeddings_store:
         return {"error": "No document uploaded yet"}
-    results = search(query, embeddings_store)
-    # top_chunks = [text for score, text in results]
+    results, query_vec = search(query, embeddings_store)
     selected_indices = [idx for score, idx in results]
 
     context_chunks = []
@@ -94,11 +72,16 @@ async def ask_question(query: str):
     for idx in selected_indices:
         for neighbor in [idx - 1, idx, idx + 1]:
             if 0 <= neighbor < len(embeddings_store):
-                context_chunks.append(embeddings_store[neighbor]["text"])
-    context_chunks = list(dict.fromkeys(context_chunks))
-    answer = generate_answer(query, context_chunks)
-
-    # answer = generate_answer(query, top_chunks)
+                context_chunks.append(embeddings_store[neighbor])
+    seen = set()
+    unseen_chunks = []
+    for item in context_chunks:
+        if item['index'] not in seen:
+            unseen_chunks.append(item)
+            seen.add(item['index'])
+    context_chunks = unseen_chunks
+    final_chunks = rerank_chunks(context_chunks, query_vec)
+    answer = generate_answer(query, final_chunks)
 
     return {
         "question": query,
@@ -120,11 +103,11 @@ def search(query, embeddings_store):
         # Base semantic score
         score = cosine_similarity(query_vec, item["vector"])
 
-        # 🔥 Full phrase boost (strong signal)
+        # Full phrase boost (strong signal)
         if query_lower in text_lower:
             score += 0.5
 
-        # 🔥 Keyword boost (medium signal)
+        # Keyword boost (medium signal)
         keywords = query_lower.split()
         for word in keywords:
             if word in text_lower:
@@ -136,7 +119,17 @@ def search(query, embeddings_store):
     results.sort(key=lambda x: x[0], reverse=True)
 
     # Return top chunks
-    return results[:20]
+    return results[:20], query_vec
+
+
+def rerank_chunks(chunks, query_vec):
+    scored = []
+    for item in chunks:
+        score = cosine_similarity(query_vec, item["vector"])
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item['text'] for score, item in scored[:5]]  # keep best 5
 
 
 def cosine_similarity(a, b):
