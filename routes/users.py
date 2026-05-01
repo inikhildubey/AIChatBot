@@ -13,3 +13,5 @@ def user_profile(query: UserQuery = Depends()):
 @router.get("/list")
 async def user_list():
     return {"message": "Success", "users": {}}
+
+

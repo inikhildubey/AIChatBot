@@ -1,7 +1,8 @@
 import io
+import re
 import json
 import os
-import re
+import textwrap
 
 import chromadb
 import numpy as np
@@ -61,10 +62,30 @@ async def upload_data(file: UploadFile = File(...)):
     return {"filename": file.filename, "chunks": len(chunks)}
 
 
-def chunk_text(text, chunk_size=500, overlap=200):
+# Old chunking strategy
+# def chunk_text(text, chunk_size=500, overlap=200):
+#     chunks = []
+#     for i in range(0, len(text), chunk_size - overlap):
+#         chunks.append(text[i:i + chunk_size])
+#     return chunks
+
+
+def chunk_text(text, chunk_size=500):
+    sentences = re.split(r'(?<=[.!?]) +', text)
+
     chunks = []
-    for i in range(0, len(text), chunk_size - overlap):
-        chunks.append(text[i:i + chunk_size])
+    current_chunk = ""
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < chunk_size:
+            current_chunk += " " + sentence
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
     return chunks
 
 
@@ -84,7 +105,42 @@ async def ask_question(query: str):
 
     answer = generate_answer(query, final_chunks)
 
-    return {"question": query, "answer": answer}
+    return {"question": query, "answer": answer, "chunks": build_sources(context_chunks)}
+
+
+def build_sources(context_chunks, top_n=3):
+    sources = []
+
+    for score, text in context_chunks[:top_n]:
+        text = clean_text(text)
+        text = re.sub(r'^[^a-zA-Z0-9]+', '', text)
+        snippet = get_clean_snippet(text)
+
+        sources.append({
+            "snippet": snippet,
+            "score": round(score, 2)
+        })
+
+    return sources
+
+
+def get_clean_snippet(text):
+    # Step 1: clean weird characters
+    text = clean_text(text)
+
+    # Step 2: split into sentences
+    sentences = text.split(".")
+
+    # Step 3: find first meaningful sentence
+    for s in sentences:
+        s = s.strip()
+
+        # ignore very short / broken sentences
+        if len(s) > 40:
+            return textwrap.shorten(s, width=500, placeholder="...")
+
+    # fallback if nothing found
+    return textwrap.shorten(text, width=500, placeholder="...")
 
 
 def search(query, top_k=25):
