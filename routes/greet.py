@@ -65,26 +65,13 @@ async def upload_data(file: UploadFile = File(...)):
 
 def chunk_text(text, chunk_size=500):
     sentences = re.split(r'(?<=[.!?]) +', text)
-
-    chunks = []
-    current_chunk = ""
-
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < chunk_size:
-            current_chunk += " " + sentence
-        else:
-            chunks.append(current_chunk.strip())
-            current_chunk = sentence
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
     chunk_size = 2  # 2–3 sentences per chunk
 
     chunks = [
         " ".join(sentences[i:i + chunk_size])
         for i in range(0, len(sentences), chunk_size)
     ]
-
+    chunks = [c.strip() for c in chunks if 80 < len(c) < 500]
     return chunks
 
 
@@ -137,6 +124,48 @@ def get_clean_snippet(text):
     return textwrap.shorten(text, width=500, placeholder="...")
 
 
+# def search(query, top_k=25):
+#     queries = [query]
+#
+#     rewritten = rewrite_query(query)
+#
+#     for q in rewritten:
+#         q = q.lower().strip()
+#         q = re.sub(r"\s+", " ", q)
+#         if q not in queries:
+#             queries.append(q)
+#
+#     # store chunks per query separately
+#     all_results = []
+#
+#     for q in queries:
+#         query_vec = get_embedding(q)
+#
+#         results = collection.query(
+#             query_embeddings=[query_vec],
+#             n_results=top_k
+#         )
+#
+#         chunks = top_chunks(results, q)
+#
+#         # keep top chunks per query
+#         all_results.append(chunks[:10])
+#
+#     # 🔥 merge fairly
+#     context_chunks = merge_round_robin(all_results, top_k=20)
+#     unique_chunks = []
+#     seen_docs = set()
+#
+#     for iteam in context_chunks:
+#         doc = iteam.get('doc')
+#         normalized = clean_text(doc)
+#
+#         if normalized not in seen_docs:
+#             seen_docs.add(normalized)
+#             unique_chunks.append(iteam)
+#     return [(item["score"], item["doc"]) for item in unique_chunks[:20]]
+
+
 def search(query, top_k=25):
     queries = [query]
 
@@ -148,9 +177,10 @@ def search(query, top_k=25):
         if q not in queries:
             queries.append(q)
 
-    # store chunks per query separately
-    all_results = []
+    all_vector_chunks = []
+    all_keyword_chunks = []
 
+    # 🔹 VECTOR RETRIEVAL
     for q in queries:
         query_vec = get_embedding(q)
 
@@ -159,31 +189,90 @@ def search(query, top_k=25):
             n_results=top_k
         )
 
-        chunks = top_chunks(results, q)
+        chunks = top_chunks(results, q)   # your existing function
+        all_vector_chunks.extend(chunks)
 
-        # keep top chunks per query
-        all_results.append(chunks[:10])
+    # 🔹 KEYWORD RETRIEVAL
+    keyword_chunks = keyword_search(query)
+    all_keyword_chunks.extend(keyword_chunks)
 
-    # 🔥 merge fairly
-    context_chunks = merge_round_robin(all_results, top_k=20)
+    # 🔹 MERGE BOTH
+    merged_chunks = []
+
+    # vector chunks (dict format)
+    for item in all_vector_chunks:
+        merged_chunks.append((item["score"], item["doc"]))
+
+    # keyword chunks (tuple format)
+    for item in all_keyword_chunks:
+        score = item.get('score') * 2  # simple keyword score
+        merged_chunks.append((item.get('score') * 2, item.get('doc')))
+
+    # 🔹 DEDUPLICATE
+    seen = set()
     unique_chunks = []
-    seen_docs = set()
 
-    for iteam in context_chunks:
-        doc = iteam.get('doc')
+    for score, doc in merged_chunks:
         normalized = clean_text(doc)
 
-        if normalized not in seen_docs:
-            seen_docs.add(normalized)
-            unique_chunks.append(iteam)
-    return [(item["score"], item["doc"]) for item in unique_chunks[:20]]
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_chunks.append((score, doc))
+
+    # 🔹 FINAL SORT
+    unique_chunks.sort(key=lambda x: x[0], reverse=True)
+
+    return unique_chunks[:20]
+
+def keyword_search(query, max_chunks=30):
+    stop_words = {
+        "what", "is", "the", "does", "are", "a", "an", "of",
+        "between", "difference", "compare", "vs", "how", "why"
+    }
+
+    query_words = {
+        word.lower()
+        for word in query.split()
+        if word.lower() not in stop_words and len(word) > 2
+    }
+
+    results = []
+
+    # ⚠️ This scans your DB (okay for now)
+    all_docs = collection.get(include=["documents"])
+
+    for doc, doc_id in zip(all_docs["documents"], all_docs["ids"]):
+        text = doc.lower()
+
+        doc_words = set(re.findall(r"\w+", text))
+        overlap = len(query_words.intersection(doc_words))
+
+        if overlap > 0:
+            results.append({
+                "score": overlap,
+                "doc": doc,
+                "source": "keyword"
+            })
+
+    # sort by keyword match strength
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    return results[:max_chunks]
 
 
 def top_chunks(results, query):
     context_chunks = []
+
     stop_words = {
         "what", "is", "the", "does", "are", "a", "an", "of",
-        "between", "difference", "compare"
+        "between", "difference", "compare", "vs", "how", "why"
+    }
+
+    # 🔹 extract meaningful query words
+    query_words = {
+        word.lower()
+        for word in query.split()
+        if word.lower() not in stop_words and len(word) > 2
     }
 
     ids = results.get("ids")[0]
@@ -191,9 +280,11 @@ def top_chunks(results, query):
 
     for idx_str, dist in zip(ids, distances):
         idx = int(idx_str)
-        vector_score = 1 - dist
-        neighbors = [idx]
 
+        vector_score = 1 - dist
+
+        # 🔹 neighbor expansion (controlled)
+        neighbors = [idx]
         if vector_score > 0.7:
             neighbors.extend([idx - 1, idx + 1])
 
@@ -202,60 +293,41 @@ def top_chunks(results, query):
                 continue
 
             data = collection.get(ids=[str(neighbor)])
-            doc = data.get("documents")
+            doc_list = data.get("documents")
 
-            if not doc:
+            if not doc_list:
                 continue
 
-            doc = doc[0].lower()
+            doc = doc_list[0].lower()
+
+            # 🔹 keyword overlap (CORE PART)
+            doc_words = set(doc.split())
+            keyword_overlap = len(query_words.intersection(doc_words))
+
+            # 🔹 filter (IMPORTANT)
+            if keyword_overlap == 0 and vector_score < 0.65:
+                continue
+
+            # 🔹 scoring (clean & simple)
             score = 0
-            match_count = 0
+            score += vector_score * 2
+            score += keyword_overlap * 2
 
-            # 🔥 vector score
-            score += vector_score * 2  # slightly stronger
-
-            # 🔥 phrase match
+            # 🔹 phrase boost (optional but useful)
             if query in doc:
                 score += 3
-                match_count += 1
-
-            # 🔥 acronym boost (MOVE BEFORE FILTER)
-            if len(query) <= 5:
-                if f"({query})" in doc or doc.startswith(query):
-                    score += 2
-                    match_count += 1
-
-            # 🔥 word matching
-            for word in query.split():
-                if word in stop_words:
-                    continue
-
-                if word in doc:
-                    match_count += 1
-
-                    if len(word) > 4:
-                        score += 2
-                    else:
-                        score += 0.5
-
-            comparison_words = {"difference", "compare", "vs"}
-            query_words = set(query.split())
-            if query_words.intersection(comparison_words):
-                if any(word in doc for word in ["whereas", "while", "difference", "compared"]):
-                    score += 3
-                    match_count += 1
-
-            # 🔥 smart filter
-            if match_count == 0 and vector_score < 0.6:
-                continue
 
             context_chunks.append({
                 "score": score,
                 "doc": doc,
                 "vector_score": round(vector_score, 3),
-                "match_count": match_count
+                "keyword_overlap": keyword_overlap,
+                "source": "vector"
             })
+
+    # 🔹 sort final chunks
     context_chunks.sort(key=lambda x: x["score"], reverse=True)
+
     return context_chunks
 
 
