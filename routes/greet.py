@@ -51,11 +51,13 @@ async def upload_data(file: UploadFile = File(...)):
     text = ""
     for page in pdf.pages:
         text += page.extract_text() or ""
-    text = text.replace("\n", " ").strip()
+    text = clean_text(text)
     chunks = chunk_text(text)
     chunks = [c.strip() for c in chunks if len(c.strip()) > 50]
 
     for idx, chunk in enumerate(chunks):
+        print("Chunk Number:", idx, "\nLength of chunk:", len(chunk))
+        print("Chunk text:", chunk)
         emb = get_embedding(chunk)
 
         collection.add(documents=[chunk], embeddings=[emb], ids=[str(idx)], metadatas=[{"chunk_id": idx}])
@@ -63,17 +65,94 @@ async def upload_data(file: UploadFile = File(...)):
     return {"filename": file.filename, "chunks": len(chunks)}
 
 
-def chunk_text(text, chunk_size=500):
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    chunk_size = 2  # 2–3 sentences per chunk
+# def chunk_text(text, chunk_size=500):
+#     sentences = re.split(r'(?<=[.!?]) +', text)
+#     chunk_size = 2  # 2–3 sentences per chunk
+#
+#     chunks = [
+#         " ".join(sentences[i:i + chunk_size])
+#         for i in range(0, len(sentences), chunk_size)
+#     ]
+#     chunks = [c.strip() for c in chunks if 80 < len(c) < 500]
+#     return chunks
 
-    chunks = [
-        " ".join(sentences[i:i + chunk_size])
-        for i in range(0, len(sentences), chunk_size)
-    ]
-    chunks = [c.strip() for c in chunks if 80 < len(c) < 500]
+
+# def chunk_text(text, chunk_size=300):
+#     sentences = re.split(r'(?<=[.!?])\s+', text)
+#
+#     chunks = []
+#     current_chunk = ""
+#
+#     for sent in sentences:
+#         if not sent.strip():
+#             continue
+#
+#         if len(current_chunk) + len(sent) < chunk_size:
+#             current_chunk += " " + sent
+#         else:
+#             chunks.append(current_chunk.strip())
+#
+#             # overlap
+#             words = current_chunk.split()
+#             overlap_words = words[-20:]
+#             current_chunk = " ".join(overlap_words) + " " + sent
+#
+#     if current_chunk:
+#         chunks.append(current_chunk.strip())
+#
+#     return chunks
+
+# def chunk_text(text, min_words=80, max_words=150):
+#     words = text.split()
+#     chunks = []
+#
+#     current_chunk = []
+#
+#     for word in words:
+#         current_chunk.append(word)
+#
+#         if len(current_chunk) >= max_words:
+#             chunks.append(" ".join(current_chunk))
+#             current_chunk = []
+#
+#     # handle leftover
+#     if current_chunk:
+#         if len(current_chunk) < min_words and chunks:
+#             # merge with last chunk
+#             chunks[-1] += " " + " ".join(current_chunk)
+#         else:
+#             chunks.append(" ".join(current_chunk))
+#
+#     return chunks
+
+def chunk_text(text, max_words=120, overlap=20):
+    # Step 1: try sentence split
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks = []
+    current_chunk = []
+
+    for sent in sentences:
+        words = sent.split()
+
+        #  If sentence itself is too big → fallback to word split
+        if len(words) > max_words:
+            for i in range(0, len(words), max_words - overlap):
+                sub_chunk = words[i:i + max_words]
+                chunks.append(" ".join(sub_chunk))
+            continue
+
+        # normal sentence accumulation
+        if len(current_chunk) + len(words) > max_words:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = current_chunk[-overlap:] + words
+        else:
+            current_chunk.extend(words)
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
     return chunks
-
 
 def get_embedding(text: str, provider="ollama"):
     if provider == "ollama":
@@ -87,9 +166,9 @@ async def ask_question(query: str):
     query = re.sub(r"\s+", " ", query)
     context_chunks = search(query)
     chunk_text = []
-    for score, text in context_chunks:
+    for item in context_chunks:
+        text = item["doc"]
         chunk_text.append(text)
-
     answer = generate_answer(query, chunk_text)
     return {"question": query, "answer": answer, "chunks": build_sources(context_chunks)}
 
@@ -97,7 +176,9 @@ async def ask_question(query: str):
 def build_sources(context_chunks, top_n=3):
     sources = []
 
-    for score, text in context_chunks[:top_n]:
+    for item in context_chunks[:top_n]:
+        text = item['doc']
+        score = item['score']
         text = clean_text(text)
         text = re.sub(r'^[^a-zA-Z0-9]+', '', text)
         snippet = get_clean_snippet(text)
@@ -124,48 +205,6 @@ def get_clean_snippet(text):
     return textwrap.shorten(text, width=500, placeholder="...")
 
 
-# def search(query, top_k=25):
-#     queries = [query]
-#
-#     rewritten = rewrite_query(query)
-#
-#     for q in rewritten:
-#         q = q.lower().strip()
-#         q = re.sub(r"\s+", " ", q)
-#         if q not in queries:
-#             queries.append(q)
-#
-#     # store chunks per query separately
-#     all_results = []
-#
-#     for q in queries:
-#         query_vec = get_embedding(q)
-#
-#         results = collection.query(
-#             query_embeddings=[query_vec],
-#             n_results=top_k
-#         )
-#
-#         chunks = top_chunks(results, q)
-#
-#         # keep top chunks per query
-#         all_results.append(chunks[:10])
-#
-#     # 🔥 merge fairly
-#     context_chunks = merge_round_robin(all_results, top_k=20)
-#     unique_chunks = []
-#     seen_docs = set()
-#
-#     for iteam in context_chunks:
-#         doc = iteam.get('doc')
-#         normalized = clean_text(doc)
-#
-#         if normalized not in seen_docs:
-#             seen_docs.add(normalized)
-#             unique_chunks.append(iteam)
-#     return [(item["score"], item["doc"]) for item in unique_chunks[:20]]
-
-
 def search(query, top_k=25):
     queries = [query]
 
@@ -189,7 +228,7 @@ def search(query, top_k=25):
             n_results=top_k
         )
 
-        chunks = top_chunks(results, q)   # your existing function
+        chunks = top_chunks(results, q)  # your existing function
         all_vector_chunks.extend(chunks)
 
     # 🔹 KEYWORD RETRIEVAL
@@ -208,6 +247,8 @@ def search(query, top_k=25):
         score = item.get('score') * 2  # simple keyword score
         merged_chunks.append((item.get('score') * 2, item.get('doc')))
 
+    print("\n Vector chunks:\n", all_vector_chunks)
+    print("\n Keyword chunks:\n", all_keyword_chunks)
     # 🔹 DEDUPLICATE
     seen = set()
     unique_chunks = []
@@ -221,8 +262,9 @@ def search(query, top_k=25):
 
     # 🔹 FINAL SORT
     unique_chunks.sort(key=lambda x: x[0], reverse=True)
+    reranked = rerank_chunks(query, unique_chunks)
+    return reranked[:5]
 
-    return unique_chunks[:20]
 
 def keyword_search(query, max_chunks=30):
     stop_words = {
@@ -245,11 +287,10 @@ def keyword_search(query, max_chunks=30):
         text = doc.lower()
 
         doc_words = set(re.findall(r"\w+", text))
-        overlap = len(query_words.intersection(doc_words))
-
-        if overlap > 0:
+        overlap = sum(1 for w in query_words if w in doc_words)
+        if overlap >= 1 and len(text.split()) > 15:
             results.append({
-                "score": overlap,
+                "score": overlap * 2,
                 "doc": doc,
                 "source": "keyword"
             })
@@ -331,36 +372,36 @@ def top_chunks(results, query):
     return context_chunks
 
 
-def merge_round_robin(all_results, top_k=20):
-    merged = []
-
-    # track current index for each query result list
-    pointers = [0] * len(all_results)
-
-    while len(merged) < top_k:
-        added_any = False
-
-        for i, chunk_list in enumerate(all_results):
-
-            # if current query still has chunks left
-            if pointers[i] < len(chunk_list):
-
-                merged.append(chunk_list[pointers[i]])
-
-                # move pointer forward
-                pointers[i] += 1
-
-                added_any = True
-
-                # stop if enough chunks collected
-                if len(merged) >= top_k:
-                    break
-
-        # if no query has chunks left
-        if not added_any:
-            break
-
-    return merged
+# def merge_round_robin(all_results, top_k=20):
+#     merged = []
+#
+#     # track current index for each query result list
+#     pointers = [0] * len(all_results)
+#
+#     while len(merged) < top_k:
+#         added_any = False
+#
+#         for i, chunk_list in enumerate(all_results):
+#
+#             # if current query still has chunks left
+#             if pointers[i] < len(chunk_list):
+#
+#                 merged.append(chunk_list[pointers[i]])
+#
+#                 # move pointer forward
+#                 pointers[i] += 1
+#
+#                 added_any = True
+#
+#                 # stop if enough chunks collected
+#                 if len(merged) >= top_k:
+#                     break
+#
+#         # if no query has chunks left
+#         if not added_any:
+#             break
+#
+#     return merged
 
 
 def generate_answer(query: str, context_chunks: list):
@@ -437,7 +478,90 @@ def rewrite_query(query: str):
 
 
 def clean_text(text):
-    text = re.sub(r'[\uf000-\uf0ff]', '', text)  # remove weird unicode bullets
     text = text.replace("\n", " ")
-    text = re.sub(r'\s+', ' ', text)  # normalize spaces
+    text = re.sub(r'[\uf000-\uf0ff]', '', text)
+    #  Remove long dotted placeholders (forms like "...........")
+    text = re.sub(r'\.{3,}', ' ', text)
+
+    #  Remove repeated special chars
+    text = re.sub(r'[-_]{3,}', ' ', text)
+
+    # fix broken words like "w slr"
+    text = re.sub(r'\b[a-z]\s+(?=[a-z])', '', text)
+
+    # normalize spaces
+    text = re.sub(r'\s+', ' ', text)
+
     return text.strip()
+
+
+def rerank_chunks(query, chunks):
+    reranked = []
+
+    for base_score, doc in chunks[:15]:  # limit for cost
+
+        prompt = f"""
+        You are a STRICT evaluator.
+
+        Query: {query}
+
+        Chunk:
+        {doc}
+
+        Your job is to check:
+        Does this chunk DIRECTLY answer the question?
+
+        SCORING RULES:
+
+        10 → Exact definition or direct answer
+        7-9 → Strong explanation answering the question
+        4-6 → Mentions topic but DOES NOT answer
+        1-3 → Weak mention only
+        0 → Irrelevant
+
+        IMPORTANT NEGATIVE RULES:
+
+        - If chunk is:
+          * table of contents
+          * headings
+          * list of topics
+          * questions list
+          * incomplete sentence
+          → score MUST be 0–2
+
+        - If chunk only contains "SLR" but no definition → MAX score = 5
+
+        - If chunk does NOT explain "what is SLR" → DO NOT give above 6
+
+        Be VERY strict.
+
+        Return ONLY a number.
+        """
+
+        response = ollama.chat(
+            model="llama3",
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0}
+        )
+
+        text = response["message"]["content"]
+
+        #  Extract LLM score
+        match = re.search(r"\d+", text)
+        llm_score = int(match.group()) if match else 0
+        if llm_score <= 6:
+            continue
+        #  Combine with existing score
+        combined_score = (llm_score * 10) + base_score
+        reranked.append({
+            "score": combined_score,
+            "doc": doc,
+            "base_score": base_score,
+            "llm_score": llm_score
+        })
+
+    #  Final sorting
+    reranked.sort(key=lambda x: x["score"], reverse=True)
+    print("Final chunks after reranking", reranked)
+
+    return reranked
