@@ -52,7 +52,11 @@ async def upload_data(file: UploadFile = File(...)):
     for page in pdf.pages:
         text += page.extract_text() or ""
     text = clean_text(text)
-    chunks = chunk_text(text)
+    cleaned = clean_text(text)
+    paragraphs = cleaned.split("\n")
+    filtered_text = [p for p in paragraphs if not is_noise(p) and len(p.split()) > 8]
+
+    chunks = chunk_text(filtered_text)
     chunks = [c.strip() for c in chunks if len(c.strip()) > 50]
 
     for idx, chunk in enumerate(chunks):
@@ -126,13 +130,10 @@ async def upload_data(file: UploadFile = File(...)):
 #     return chunks
 
 def chunk_text(text, max_words=120, overlap=20):
-    # Step 1: try sentence split
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-
     chunks = []
     current_chunk = []
 
-    for sent in sentences:
+    for sent in text:
         words = sent.split()
 
         #  If sentence itself is too big → fallback to word split
@@ -148,11 +149,13 @@ def chunk_text(text, max_words=120, overlap=20):
             current_chunk = current_chunk[-overlap:] + words
         else:
             current_chunk.extend(words)
-
     if current_chunk:
-        chunks.append(" ".join(current_chunk))
+        chunk_text = " ".join(current_chunk)
+        if len(chunk_text.split()) > 15:  # basic quality check
+            chunks.append(chunk_text)
 
     return chunks
+
 
 def get_embedding(text: str, provider="ollama"):
     if provider == "ollama":
@@ -205,7 +208,7 @@ def get_clean_snippet(text):
     return textwrap.shorten(text, width=500, placeholder="...")
 
 
-def search(query, top_k=25):
+def search(query, top_k=5):
     queries = [query]
 
     rewritten = rewrite_query(query)
@@ -263,7 +266,7 @@ def search(query, top_k=25):
     # 🔹 FINAL SORT
     unique_chunks.sort(key=lambda x: x[0], reverse=True)
     reranked = rerank_chunks(query, unique_chunks)
-    return reranked[:5]
+    return reranked[:6]
 
 
 def keyword_search(query, max_chunks=30):
@@ -411,18 +414,24 @@ def generate_answer(query: str, context_chunks: list):
         f"Chunk {i + 1}: {clean_text(t)}"
         for i, t in enumerate(context_chunks)
     )
-    prompt = f"""
-    You are a grounded assistant.
 
-    You MUST answer using ONLY the provided context.
+    prompt = f"""
+    You are a strictly grounded assistant.
+
+    You MUST answer ONLY using the provided context.
+
     RULES:
     - Use ONLY the given context
-    - You MAY combine information from multiple chunks
-    - You MAY infer simple relationships (like comparison or explanation)
-    - Do NOT use external knowledge
-    IMPORTANT:
-    - If NO relevant information exists → say "I don't know"
-    - If information is partially available → answer using what is available
+    - Do NOT use any external knowledge
+    - Do NOT guess or assume missing information
+    - Do NOT complete information using prior knowledge
+
+    CRITICAL:
+    - If the answer is NOT explicitly present in the context → say:
+      "I don't know based on the provided context."
+
+    - If BOTH items (for comparison) are NOT clearly explained → say:
+      "I don't know based on the provided context."
 
     Context:
     {context}
@@ -430,7 +439,7 @@ def generate_answer(query: str, context_chunks: list):
     Question:
     {query}
 
-    Answer clearly and concisely.
+    Answer ONLY if the context explicitly supports it.
     """
     response = ollama.chat(
         model="llama3",
@@ -478,65 +487,67 @@ def rewrite_query(query: str):
 
 
 def clean_text(text):
-    text = text.replace("\n", " ")
+    # remove weird unicode
     text = re.sub(r'[\uf000-\uf0ff]', '', text)
-    #  Remove long dotted placeholders (forms like "...........")
+    # remove long dotted placeholders
     text = re.sub(r'\.{3,}', ' ', text)
-
-    #  Remove repeated special chars
+    # remove repeated special chars
     text = re.sub(r'[-_]{3,}', ' ', text)
-
     # fix broken words like "w slr"
     text = re.sub(r'\b[a-z]\s+(?=[a-z])', '', text)
-
-    # normalize spaces
-    text = re.sub(r'\s+', ' ', text)
-
+    # normalize spaces BUT preserve newlines
+    text = re.sub(r'[ \t]+', ' ', text)
+    # remove page numbers like "123"
+    text = re.sub(r'\b\d{1,3}\b', ' ', text)
+    # fix broken newlines
+    text = re.sub(r'\n+', '\n', text)
     return text.strip()
 
 
 def rerank_chunks(query, chunks):
     reranked = []
 
-    for base_score, doc in chunks[:15]:  # limit for cost
+    # Limit candidates to reduce cost + noise
+    for base_score, doc in chunks[:10]:
 
         prompt = f"""
-        You are a STRICT evaluator.
-
+        You are a strict scoring system.
+        
         Query: {query}
-
+        
         Chunk:
         {doc}
-
-        Your job is to check:
-        Does this chunk DIRECTLY answer the question?
-
-        SCORING RULES:
-
-        10 → Exact definition or direct answer
-        7-9 → Strong explanation answering the question
-        4-6 → Mentions topic but DOES NOT answer
-        1-3 → Weak mention only
-        0 → Irrelevant
-
-        IMPORTANT NEGATIVE RULES:
-
-        - If chunk is:
-          * table of contents
-          * headings
-          * list of topics
-          * questions list
-          * incomplete sentence
-          → score MUST be 0–2
-
-        - If chunk only contains "SLR" but no definition → MAX score = 5
-
-        - If chunk does NOT explain "what is SLR" → DO NOT give above 6
-
-        Be VERY strict.
-
-        Return ONLY a number.
-        """
+        
+        Rules:
+        
+        - If BOTH concepts + clear difference → 9 or 10
+        - If BOTH but no difference → 5
+        - If only one concept → 2
+        - If irrelevant → 0
+        
+        CRITICAL:
+        - Output ONLY ONE NUMBER
+        - Do NOT explain
+        - Do NOT write text
+        - Do NOT write range (like 9-10)
+        - Do NOT write sentences
+        
+        Valid outputs:
+        0
+        2
+        5
+        9
+        10
+        
+        ONLY output the number.
+        
+        IMPORTANT:
+        - You MUST differentiate scores
+        - Best chunk → 9–10
+        - Medium → 5–7
+        - Weak → 1–3
+        - Do NOT give same score unless truly equal
+    """
 
         response = ollama.chat(
             model="llama3",
@@ -544,15 +555,23 @@ def rerank_chunks(query, chunks):
             options={"temperature": 0}
         )
 
-        text = response["message"]["content"]
+        text = response["message"]["content"].strip()
 
-        #  Extract LLM score
-        match = re.search(r"\d+", text)
-        llm_score = int(match.group()) if match else 0
-        if llm_score <= 6:
-            continue
-        #  Combine with existing score
-        combined_score = (llm_score * 10) + base_score
+        # 🔍 Debug raw LLM output
+        print("RAW LLM OUTPUT:", text)
+
+        # 🔢 Safe score extraction
+        match = re.search(r"\b(10|[0-9])\b", text)
+
+        if match:
+            llm_score = int(match.group())
+        else:
+            print("⚠️ Failed to parse LLM output:", text)
+            llm_score = 0
+
+        # 🧠 Combine score (LLM primary, base_score for tie-break)
+        combined_score = llm_score + (0.01 * base_score)
+
         reranked.append({
             "score": combined_score,
             "doc": doc,
@@ -560,8 +579,32 @@ def rerank_chunks(query, chunks):
             "llm_score": llm_score
         })
 
-    #  Final sorting
+    # 🔽 Sort by final score
     reranked.sort(key=lambda x: x["score"], reverse=True)
-    print("Final chunks after reranking", reranked)
+
+    # 📊 Debug final ranking
+    print("\n===== FINAL RERANKED =====")
+    for i, r in enumerate(reranked):
+        print(f"{i + 1}. Score: {r['score']} (LLM: {r['llm_score']}, Base: {r['base_score']})")
+        print(r['doc'][:200])
+        print("------")
 
     return reranked
+
+
+def is_noise(text):
+    text = text.lower()
+
+    if any(x in text for x in [
+        "practice questions",
+        "session",
+        "ppt",
+        "exercise",
+        "objective"
+    ]):
+        return True
+
+    if "?" in text:
+        return True
+
+    return False
