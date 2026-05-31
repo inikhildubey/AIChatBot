@@ -10,6 +10,7 @@ import numpy as np
 import ollama
 from fastapi import APIRouter, UploadFile, File
 from pypdf import PdfReader
+from rank_bm25 import BM25Okapi
 
 router = APIRouter(prefix="/greet")
 BASE_DIR = os.path.dirname(__file__)
@@ -24,6 +25,7 @@ client = chromadb.PersistentClient(path=os.path.join(BASE_DIR, "chroma_db"))
 collection = client.get_or_create_collection(name="documents")
 
 embeddings_store = []
+bm25_store = {}
 
 
 # if os.path.exists("embeddings.json"):
@@ -51,14 +53,21 @@ async def upload_data(file: UploadFile = File(...)):
     text = ""
     for page in pdf.pages:
         text += page.extract_text() or ""
-    text = clean_text(text)
     cleaned = clean_text(text)
     paragraphs = cleaned.split("\n")
     filtered_text = [p for p in paragraphs if not is_noise(p) and len(p.split()) > 8]
 
     chunks = chunk_text(filtered_text)
     chunks = [c.strip() for c in chunks if len(c.strip()) > 50]
+    # BM25 Indexing
+    tokenized_chunks = [chunk.lower().split() for chunk in chunks]
 
+    bm25 = BM25Okapi(tokenized_chunks)
+
+    bm25_store["documents"] = {
+        "bm25": bm25,
+        "chunks": chunks
+    }
     for idx, chunk in enumerate(chunks):
         print("Chunk Number:", idx, "\nLength of chunk:", len(chunk))
         print("Chunk text:", chunk)
@@ -235,20 +244,26 @@ def search(query, top_k=5):
         all_vector_chunks.extend(chunks)
 
     # 🔹 KEYWORD RETRIEVAL
-    keyword_chunks = keyword_search(query)
+    # keyword_chunks = keyword_search(query)
+    keyword_chunks = bm25_search(query)
     all_keyword_chunks.extend(keyword_chunks)
 
     # 🔹 MERGE BOTH
     merged_chunks = []
 
-    # vector chunks (dict format)
+    # Vector chunks
     for item in all_vector_chunks:
-        merged_chunks.append((item["score"], item["doc"]))
+        merged_chunks.append((
+            1,  # neutral base score
+            item["doc"]
+        ))
 
-    # keyword chunks (tuple format)
+    # BM25 chunks
     for item in all_keyword_chunks:
-        score = item.get('score') * 2  # simple keyword score
-        merged_chunks.append((item.get('score') * 2, item.get('doc')))
+        merged_chunks.append((
+            1,  # neutral base score
+            item["doc"]
+        ))
 
     print("\n Vector chunks:\n", all_vector_chunks)
     print("\n Keyword chunks:\n", all_keyword_chunks)
@@ -257,6 +272,7 @@ def search(query, top_k=5):
     unique_chunks = []
 
     for score, doc in merged_chunks:
+        print("Score:", score, "Text:-", doc)
         normalized = clean_text(doc)
 
         if normalized not in seen:
@@ -269,39 +285,65 @@ def search(query, top_k=5):
     return reranked[:6]
 
 
-def keyword_search(query, max_chunks=30):
-    stop_words = {
-        "what", "is", "the", "does", "are", "a", "an", "of",
-        "between", "difference", "compare", "vs", "how", "why"
-    }
+def bm25_search(query, top_k=5):
+    bm25 = bm25_store["documents"]["bm25"]
+    chunks = bm25_store["documents"]["chunks"]
 
-    query_words = {
-        word.lower()
-        for word in query.split()
-        if word.lower() not in stop_words and len(word) > 2
-    }
+    tokenized_query = query.lower().split()
+
+    scores = bm25.get_scores(tokenized_query)
+
+    ranked = sorted(
+        zip(scores, chunks),
+        key=lambda x: x[0],
+        reverse=True
+    )
 
     results = []
 
-    # ⚠️ This scans your DB (okay for now)
-    all_docs = collection.get(include=["documents"])
+    for score, doc in ranked[:top_k]:
+        results.append({
+            "score": round(score, 3),
+            "doc": doc,
+            "source": "bm25"
+        })
 
-    for doc, doc_id in zip(all_docs["documents"], all_docs["ids"]):
-        text = doc.lower()
+    return results
 
-        doc_words = set(re.findall(r"\w+", text))
-        overlap = sum(1 for w in query_words if w in doc_words)
-        if overlap >= 1 and len(text.split()) > 15:
-            results.append({
-                "score": overlap * 2,
-                "doc": doc,
-                "source": "keyword"
-            })
 
-    # sort by keyword match strength
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    return results[:max_chunks]
+# def keyword_search(query, max_chunks=30):
+#     stop_words = {
+#         "what", "is", "the", "does", "are", "a", "an", "of",
+#         "between", "difference", "compare", "vs", "how", "why"
+#     }
+#
+#     query_words = {
+#         word.lower()
+#         for word in query.split()
+#         if word.lower() not in stop_words and len(word) > 2
+#     }
+#
+#     results = []
+#
+#     # ⚠️ This scans your DB (okay for now)
+#     all_docs = collection.get(include=["documents"])
+#
+#     for doc, doc_id in zip(all_docs["documents"], all_docs["ids"]):
+#         text = doc.lower()
+#
+#         doc_words = set(re.findall(r"\w+", text))
+#         overlap = sum(1 for w in query_words if w in doc_words)
+#         if overlap >= 1 and len(text.split()) > 15:
+#             results.append({
+#                 "score": overlap * 2,
+#                 "doc": doc,
+#                 "source": "keyword"
+#             })
+#
+#     # sort by keyword match strength
+#     results.sort(key=lambda x: x["score"], reverse=True)
+#
+#     return results[:max_chunks]
 
 
 def top_chunks(results, query):
@@ -511,43 +553,45 @@ def rerank_chunks(query, chunks):
     for base_score, doc in chunks[:10]:
 
         prompt = f"""
-        You are a strict scoring system.
-        
+        You are a strict ranking system.
+
         Query: {query}
-        
+
         Chunk:
         {doc}
-        
-        Rules:
-        
-        - If BOTH concepts + clear difference → 9 or 10
-        - If BOTH but no difference → 5
-        - If only one concept → 2
-        - If irrelevant → 0
-        
-        CRITICAL:
-        - Output ONLY ONE NUMBER
-        - Do NOT explain
-        - Do NOT write text
-        - Do NOT write range (like 9-10)
-        - Do NOT write sentences
-        
-        Valid outputs:
-        0
-        2
-        5
-        9
-        10
-        
-        ONLY output the number.
-        
+
+        Your task:
+        Score how well this chunk ALONE can answer the query.
+
+        SCORING RULES:
+
+        10 = Complete answer directly present
+        8 = Strongly relevant but partially incomplete
+        5 = Mentions concepts but lacks explanation
+        2 = Weak relevance
+        0 = Irrelevant
+
         IMPORTANT:
-        - You MUST differentiate scores
-        - Best chunk → 9–10
-        - Medium → 5–7
-        - Weak → 1–3
-        - Do NOT give same score unless truly equal
-    """
+        - A chunk that ONLY mentions the concepts WITHOUT explaining their difference MUST NOT score above 5.
+        - Presence of keywords alone is NOT enough
+        - The chunk must contain actual explanation
+        - Comparison questions REQUIRE explicit comparison
+        - Prefer chunks with direct definitions or differences
+        - Penalize noisy or unrelated chunks
+        
+        For comparison questions:
+        - Mentioning BOTH entities is NOT enough
+        - The chunk must explicitly compare them
+        - Chunks with actual comparison words like:
+          "whereas", "difference", "while", "compared to"
+          should score higher
+
+        You MUST differentiate scores carefully.
+
+        Return ONLY one number between 0 and 10.
+        
+        
+        """
 
         response = ollama.chat(
             model="llama3",
@@ -556,9 +600,6 @@ def rerank_chunks(query, chunks):
         )
 
         text = response["message"]["content"].strip()
-
-        # 🔍 Debug raw LLM output
-        print("RAW LLM OUTPUT:", text)
 
         # 🔢 Safe score extraction
         match = re.search(r"\b(10|[0-9])\b", text)
@@ -586,7 +627,7 @@ def rerank_chunks(query, chunks):
     print("\n===== FINAL RERANKED =====")
     for i, r in enumerate(reranked):
         print(f"{i + 1}. Score: {r['score']} (LLM: {r['llm_score']}, Base: {r['base_score']})")
-        print(r['doc'][:200])
+        print(r['doc'])
         print("------")
 
     return reranked
