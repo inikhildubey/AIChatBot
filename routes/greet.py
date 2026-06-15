@@ -11,6 +11,7 @@ import ollama
 from fastapi import APIRouter, UploadFile, File
 from pypdf import PdfReader
 from rank_bm25 import BM25Okapi
+from sentence_transformers import CrossEncoder
 
 router = APIRouter(prefix="/greet")
 BASE_DIR = os.path.dirname(__file__)
@@ -26,6 +27,9 @@ collection = client.get_or_create_collection(name="documents")
 
 embeddings_store = []
 bm25_store = {}
+cross_encoder = CrossEncoder(
+    "cross-encoder/ms-marco-MiniLM-L-6-v2"
+)
 
 
 # if os.path.exists("embeddings.json"):
@@ -49,15 +53,19 @@ async def upload_data(file: UploadFile = File(...)):
 
     content = await file.read()
     pdf = PdfReader(io.BytesIO(content))
-
     text = ""
     for page in pdf.pages:
         text += page.extract_text() or ""
     cleaned = clean_text(text)
-    paragraphs = cleaned.split("\n")
-    filtered_text = [p for p in paragraphs if not is_noise(p) and len(p.split()) > 8]
+    # paragraphs = cleaned.split("\n")
+    # filtered_text = [p for p in paragraphs if not is_noise(p) and len(p.split()) > 8]
 
-    chunks = chunk_text(filtered_text)
+    # sentences = re.split(r'(?<=[.!?])\s+', cleaned)
+
+    # filtered_text = [s.strip() for s in sentences if len(s.split()) > 5]
+
+    # chunks = chunk_text(filtered_text)
+    chunks = chunk_text(cleaned)
     chunks = [c.strip() for c in chunks if len(c.strip()) > 50]
     # BM25 Indexing
     tokenized_chunks = [chunk.lower().split() for chunk in chunks]
@@ -69,11 +77,24 @@ async def upload_data(file: UploadFile = File(...)):
         "chunks": chunks
     }
     for idx, chunk in enumerate(chunks):
-        print("Chunk Number:", idx, "\nLength of chunk:", len(chunk))
-        print("Chunk text:", chunk)
         emb = get_embedding(chunk)
 
-        collection.add(documents=[chunk], embeddings=[emb], ids=[str(idx)], metadatas=[{"chunk_id": idx}])
+        # collection.add(documents=[chunk], embeddings=[emb], ids=[str(idx)], metadatas=[{"chunk_id": idx}])
+        collection.add(
+            ids=[str(idx)],
+            embeddings=[emb],
+            documents=[chunk],
+            metadatas=[{
+                "chunk_id": idx,
+                "source_file": file.filename
+            }]
+        )
+
+    print("Total chunks:", len(chunks))
+    sizes = [len(c.split()) for c in chunks]
+    print("Min:", min(sizes))
+    print("Max:", max(sizes))
+    print("Avg:", sum(sizes) / len(sizes))
 
     return {"filename": file.filename, "chunks": len(chunks)}
 
@@ -90,30 +111,37 @@ async def upload_data(file: UploadFile = File(...)):
 #     return chunks
 
 
-# def chunk_text(text, chunk_size=300):
-#     sentences = re.split(r'(?<=[.!?])\s+', text)
-#
-#     chunks = []
-#     current_chunk = ""
-#
-#     for sent in sentences:
-#         if not sent.strip():
-#             continue
-#
-#         if len(current_chunk) + len(sent) < chunk_size:
-#             current_chunk += " " + sent
-#         else:
-#             chunks.append(current_chunk.strip())
-#
-#             # overlap
-#             words = current_chunk.split()
-#             overlap_words = words[-20:]
-#             current_chunk = " ".join(overlap_words) + " " + sent
-#
-#     if current_chunk:
-#         chunks.append(current_chunk.strip())
-#
-#     return chunks
+def chunk_text(text, chunk_size=300):
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks = []
+    current_chunk = ""
+
+    for sent in sentences:
+        if not sent.strip():
+            continue
+
+        if len(current_chunk) + len(sent) < chunk_size:
+            current_chunk += " " + sent
+        else:
+            chunks.append(current_chunk.strip())
+
+            # overlap
+            words = current_chunk.split()
+            overlap_words = words[-20:]
+            current_chunk = " ".join(overlap_words) + " " + sent
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    for chunk in chunks:
+        if (
+                "scheduled commercial banks" in chunk.lower()
+                or
+                "net demand and time liabilities" in chunk.lower()
+        ):
+            print("=" * 100)
+            print(chunk)
+    return chunks
 
 # def chunk_text(text, min_words=80, max_words=150):
 #     words = text.split()
@@ -138,32 +166,32 @@ async def upload_data(file: UploadFile = File(...)):
 #
 #     return chunks
 
-def chunk_text(text, max_words=120, overlap=20):
-    chunks = []
-    current_chunk = []
-
-    for sent in text:
-        words = sent.split()
-
-        #  If sentence itself is too big → fallback to word split
-        if len(words) > max_words:
-            for i in range(0, len(words), max_words - overlap):
-                sub_chunk = words[i:i + max_words]
-                chunks.append(" ".join(sub_chunk))
-            continue
-
-        # normal sentence accumulation
-        if len(current_chunk) + len(words) > max_words:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = current_chunk[-overlap:] + words
-        else:
-            current_chunk.extend(words)
-    if current_chunk:
-        chunk_text = " ".join(current_chunk)
-        if len(chunk_text.split()) > 15:  # basic quality check
-            chunks.append(chunk_text)
-
-    return chunks
+# def chunk_text(text, max_words=120, overlap=20):
+#     chunks = []
+#     current_chunk = []
+#
+#     for sent in text:
+#         words = sent.split()
+#
+#         #  If sentence itself is too big → fallback to word split
+#         if len(words) > max_words:
+#             for i in range(0, len(words), max_words - overlap):
+#                 sub_chunk = words[i:i + max_words]
+#                 chunks.append(" ".join(sub_chunk))
+#             continue
+#
+#         # normal sentence accumulation
+#         if len(current_chunk) + len(words) > max_words:
+#             chunks.append(" ".join(current_chunk))
+#             current_chunk = current_chunk[-overlap:] + words
+#         else:
+#             current_chunk.extend(words)
+#     if current_chunk:
+#         chunk_text = " ".join(current_chunk)
+#         if len(chunk_text.split()) > 15:  # basic quality check
+#             chunks.append(chunk_text)
+#
+#     return chunks
 
 
 def get_embedding(text: str, provider="ollama"):
@@ -247,34 +275,42 @@ def search(query, top_k=5):
     # keyword_chunks = keyword_search(query)
     keyword_chunks = bm25_search(query)
     all_keyword_chunks.extend(keyword_chunks)
+    rrf_chunks = reciprocal_rank_fusion(
+        all_vector_chunks,
+        all_keyword_chunks
+    )
 
-    # 🔹 MERGE BOTH
-    merged_chunks = []
-
-    # Vector chunks
-    for item in all_vector_chunks:
-        merged_chunks.append((
-            1,  # neutral base score
-            item["doc"]
-        ))
-
-    # BM25 chunks
-    for item in all_keyword_chunks:
-        merged_chunks.append((
-            1,  # neutral base score
-            item["doc"]
-        ))
+    # # 🔹 MERGE BOTH
+    # merged_chunks = []
+    #
+    # # Vector chunks
+    # for item in all_vector_chunks:
+    #     merged_chunks.append((
+    #         1,  # neutral base score
+    #         item["doc"]
+    #     ))
+    #
+    # # BM25 chunks
+    # for item in all_keyword_chunks:
+    #     merged_chunks.append((
+    #         1,  # neutral base score
+    #         item["doc"]
+    #     ))
 
     print("\n Vector chunks:\n", all_vector_chunks)
     print("\n Keyword chunks:\n", all_keyword_chunks)
+    print("\n===== RRF RESULTS =====")
+
+    for score, doc in rrf_chunks[:10]:
+        print(score)
+        print(doc[:150])
+        print("------")
     # 🔹 DEDUPLICATE
     seen = set()
     unique_chunks = []
 
-    for score, doc in merged_chunks:
-        print("Score:", score, "Text:-", doc)
+    for score, doc in rrf_chunks:
         normalized = clean_text(doc)
-
         if normalized not in seen:
             seen.add(normalized)
             unique_chunks.append((score, doc))
@@ -309,6 +345,49 @@ def bm25_search(query, top_k=5):
         })
 
     return results
+
+
+def reciprocal_rank_fusion(
+        vector_chunks,
+        bm25_chunks,
+        k=60):
+    scores = {}
+
+    # Vector Results
+    for rank, item in enumerate(vector_chunks, start=1):
+
+        doc = item["doc"]
+
+        if doc not in scores:
+            scores[doc] = 0
+
+        scores[doc] += 1 / (k + rank)
+
+    # BM25 Results
+    for rank, item in enumerate(bm25_chunks, start=1):
+
+        doc = item["doc"]
+
+        if doc not in scores:
+            scores[doc] = 0
+
+        scores[doc] += 1 / (k + rank)
+
+    # Sort by RRF score
+    sorted_results = sorted(
+        scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    final_chunks = []
+
+    for doc, score in sorted_results:
+        final_chunks.append(
+            (score, doc)
+        )
+
+    return final_chunks
 
 
 # def keyword_search(query, max_chunks=30):
@@ -546,88 +625,116 @@ def clean_text(text):
     return text.strip()
 
 
+# def rerank_chunks(query, chunks):
+#     reranked = []
+#
+#     # Limit candidates to reduce cost + noise
+#     for base_score, doc in chunks[:10]:
+#
+#         prompt = f"""
+#         Question:
+#         {query}
+#
+#         Chunk:
+#         {doc}
+#
+#         Can this chunk ALONE answer the question?
+#
+#         Scoring:
+#
+#         10 = Direct answer present
+#         7 = Most of answer present
+#         3 = Related topic only
+#         0 = Cannot answer
+#
+#         Examples:
+#
+#         Question: What is CRR?
+#
+#         Chunk: CRR stands for Cash Reserve Ratio.
+#         Score: 10
+#
+#         Chunk: RBI may increase CRR to control inflation.
+#         Score: 3
+#
+#         Chunk: NEFT is a payment system.
+#         Score: 0
+#
+#         Return ONLY the score.
+#         """
+#         response = ollama.chat(
+#             model="llama3",
+#             messages=[{"role": "user", "content": prompt}],
+#             options={"temperature": 0}
+#         )
+#         text = response["message"]["content"].strip()
+#
+#         # 🔢 Safe score extraction
+#         match = re.search(r"\b(10|[0-9])\b", text)
+#
+#         if match:
+#             llm_score = int(match.group())
+#         else:
+#             print("⚠️ Failed to parse LLM output:", text)
+#             llm_score = 0
+#
+#         # 🧠 Combine score (LLM primary, base_score for tie-break)
+#         combined_score = llm_score + (0.01 * base_score)
+#
+#         reranked.append({
+#             "score": combined_score,
+#             "doc": doc,
+#             "base_score": base_score,
+#             "llm_score": llm_score
+#         })
+#
+#     # 🔽 Sort by final score
+#     reranked.sort(key=lambda x: x["score"], reverse=True)
+#
+#     # 📊 Debug final ranking
+#     print("\n===== FINAL RERANKED =====")
+#     for i, r in enumerate(reranked):
+#         print(f"{i + 1}. Score: {r['score']} (LLM: {r['llm_score']}, Base: {r['base_score']})")
+#         print(r['doc'])
+#         print("------")
+#
+#     return reranked
+
 def rerank_chunks(query, chunks):
+    if not chunks:
+        return []
+
+    pairs = []
+
+    for score, doc in chunks[:10]:
+        pairs.append((query, doc))
+
+    ce_scores = cross_encoder.predict(pairs)
+
     reranked = []
 
-    # Limit candidates to reduce cost + noise
-    for base_score, doc in chunks[:10]:
-
-        prompt = f"""
-        You are a strict ranking system.
-
-        Query: {query}
-
-        Chunk:
-        {doc}
-
-        Your task:
-        Score how well this chunk ALONE can answer the query.
-
-        SCORING RULES:
-
-        10 = Complete answer directly present
-        8 = Strongly relevant but partially incomplete
-        5 = Mentions concepts but lacks explanation
-        2 = Weak relevance
-        0 = Irrelevant
-
-        IMPORTANT:
-        - A chunk that ONLY mentions the concepts WITHOUT explaining their difference MUST NOT score above 5.
-        - Presence of keywords alone is NOT enough
-        - The chunk must contain actual explanation
-        - Comparison questions REQUIRE explicit comparison
-        - Prefer chunks with direct definitions or differences
-        - Penalize noisy or unrelated chunks
-        
-        For comparison questions:
-        - Mentioning BOTH entities is NOT enough
-        - The chunk must explicitly compare them
-        - Chunks with actual comparison words like:
-          "whereas", "difference", "while", "compared to"
-          should score higher
-
-        You MUST differentiate scores carefully.
-
-        Return ONLY one number between 0 and 10.
-        
-        
-        """
-
-        response = ollama.chat(
-            model="llama3",
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0}
-        )
-
-        text = response["message"]["content"].strip()
-
-        # 🔢 Safe score extraction
-        match = re.search(r"\b(10|[0-9])\b", text)
-
-        if match:
-            llm_score = int(match.group())
-        else:
-            print("⚠️ Failed to parse LLM output:", text)
-            llm_score = 0
-
-        # 🧠 Combine score (LLM primary, base_score for tie-break)
-        combined_score = llm_score + (0.01 * base_score)
-
+    for (base_score, doc), ce_score in zip(chunks[:10], ce_scores):
         reranked.append({
-            "score": combined_score,
+            "score": float(ce_score),
             "doc": doc,
             "base_score": base_score,
-            "llm_score": llm_score
+            "cross_encoder_score": float(ce_score)
         })
 
-    # 🔽 Sort by final score
-    reranked.sort(key=lambda x: x["score"], reverse=True)
+    reranked.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
 
-    # 📊 Debug final ranking
-    print("\n===== FINAL RERANKED =====")
+    print("\n===== CROSS ENCODER RERANKED =====")
+
     for i, r in enumerate(reranked):
-        print(f"{i + 1}. Score: {r['score']} (LLM: {r['llm_score']}, Base: {r['base_score']})")
-        print(r['doc'])
+        print(
+            f"{i + 1}. Score: {r['score']:.4f}"
+        )
+
+        print(r["doc"][:300])
+
         print("------")
 
     return reranked
