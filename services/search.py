@@ -3,7 +3,7 @@ import re
 
 import ollama
 
-from database.bm25_store import bm25_store
+from database.bm25_store import bm25_store, load_bm25
 from database.chroma_client import get_collection
 from services.cleaning_text import clean_text
 from services.embeddings import get_embedding
@@ -213,6 +213,7 @@ def top_chunks(results, query):
 #     return results[:max_chunks]
 
 def bm25_search(query, top_k=5):
+    load_bm25()
     bm25 = bm25_store["documents"]["bm25"]
     chunks = bm25_store["documents"]["chunks"]
 

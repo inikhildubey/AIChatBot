@@ -5,7 +5,7 @@ from fastapi import UploadFile, File
 from pypdf import PdfReader
 from rank_bm25 import BM25Okapi
 
-from database.bm25_store import bm25_store
+from database.bm25_store import bm25_store, save_chunks
 from database.chroma_client import client
 from services.answer_rag import generate_answer, build_sources
 from services.chunking import chunk_text
@@ -53,6 +53,7 @@ async def upload_data(file: UploadFile = File(...)):
         "bm25": bm25,
         "chunks": chunks
     }
+    save_chunks(chunks)
     for idx, chunk in enumerate(chunks):
         emb = get_embedding(chunk)
 
