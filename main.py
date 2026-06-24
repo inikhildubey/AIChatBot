@@ -2,12 +2,14 @@ from fastapi import FastAPI, Depends
 
 from routes.users import router as user_router
 from routes.greet import router as greet_router
+from routes.agent import router as agent_router
 
 app = FastAPI()
 
 
 app.include_router(user_router)
 app.include_router(greet_router)
+app.include_router(agent_router)
 #
 # @app.get("/")
 # async def root():
