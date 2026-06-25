@@ -1,4 +1,5 @@
 # tools/calculator_tool.py
 
-def calculate(expression):
+async def calculate(decision):
+    expression = decision['expression']
     return eval(expression)

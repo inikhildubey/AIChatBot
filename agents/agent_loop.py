@@ -25,9 +25,6 @@ def decide_action(query):
                 2. Do not answer banking questions directly.
                 3. Greetings can be answered directly.
                 4. Return ONLY valid JSON.
-                5. Use field "expression"
-                6. Never use field "query"
-                7. Preserve mathematical operators (+, -, *, /)
                 
                 Examples:
                 User: What is CRR?
@@ -60,6 +57,11 @@ def decide_action(query):
                   "tool":"calculator",
                   "expression":"25*30"
                 }}
+                Rules:
+
+                - search_banking_docs must use field "query"
+                - calculator must use field "expression"
+                - Preserve mathematical operators (+, -, *, /) in calculator expressions.
                 User Question:
                 {query}
                 """
@@ -104,12 +106,15 @@ async def run_agent(query):
         }
 
     if decision["action"] == "tool":
+        tool_handler = None
+        for tool in TOOLS:
+            if tool['name'] == decision["tool"]:
+                tool_handler = tool['handler']
 
-        if decision["tool"] == "search_banking_docs":
-            result = await ask_question(
-                decision["query"]
-            )
-            return result
-        if decision["tool"] == "calculator":
-            result = calculate(decision["expression"])
-            return {"answer": result}
+        if tool_handler is None:
+            return {
+                "error": f"Unknown tool: {decision['tool']}"
+            }
+        result = await tool_handler(decision)
+        return result
+

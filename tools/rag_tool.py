@@ -77,7 +77,8 @@ async def upload_data(file: UploadFile = File(...)):
     return {"filename": file.filename, "chunks": len(chunks)}
 
 
-async def ask_question(query: str):
+async def ask_question(decision: dict):
+    query = decision['query']
     query = query.lower().replace('"', '').replace('?', '').strip()
     query = re.sub(r"\s+", " ", query)
     context_chunks = search(query)
