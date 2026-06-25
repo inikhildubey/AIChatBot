@@ -1,6 +1,7 @@
 # agents/tool_registry.py
 from tools.calculator_tool import calculate
 from tools.rag_tool import ask_question
+from tools.system_tool import get_system_info
 
 # todo optimize the TOOLS dict like this
 # TOOLS1 = {"search_banking_docs": {
@@ -42,5 +43,18 @@ TOOLS = [
         15 + 20
         """,
         "handler": calculate
+    },
+    {
+        "name": "system_tool",
+        "description": """
+        Get current date, time,
+        current day,
+        month,
+        year,
+        python version,
+        operating system.
+        """,
+        "handler": get_system_info
     }
 ]
+

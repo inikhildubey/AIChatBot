@@ -57,6 +57,23 @@ def decide_action(query):
                   "tool":"calculator",
                   "expression":"25*30"
                 }}
+                
+                User:
+                What time is it?
+                
+                {{
+                    "action":"tool",
+                    "tool":"system_tool",
+                    "query":"What time is it?"
+                }}
+                
+                User:
+                What day is today?
+                {{
+                        "action": "tool",
+                        "tool": "system_tool",
+                        "query": "What day is today?"
+                    }}
                 Rules:
 
                 - search_banking_docs must use field "query"
