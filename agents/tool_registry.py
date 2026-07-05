@@ -22,37 +22,80 @@ TOOLS = [
     {
         "name": "search_banking_docs",
         "description": """
-        Search banking concepts including:
-        CRR (Cash Reserve Ratio),
-        SLR (Statutory Liquidity Ratio),
-        RTGS,
-        NEFT,
-        Repo Rate,
-        RBI regulations,
-        Monetary Policy
+        Search information from banking documents.
+        Use this tool whenever the user asks about:
+        - CRR (Cash Reserve Ratio)
+        - SLR (Statutory Liquidity Ratio)
+        - RTGS
+        - NEFT
+        - Repo Rate
+        - RBI
+        - Banking regulations
+        - Monetary policy
+        
+        Never use this tool for:
+        - mathematics
+        - date or time
+        - operating system information
         """,
         "handler": ask_question
     },
     {
         "name": "calculator",
         "description": """
-        Perform mathematical calculations.
+        Perform arithmetic calculations.
+        Use this tool whenever the user asks to:
+        - add
+        - subtract
+        - multiply
+        - divide
+        - modulo (%)
+        - exponent (**)
+        - evaluate arithmetic expressions
+        
         Examples:
-        25 * 30
+        25 + 30
         100 / 4
-        15 + 20
+        24 % 5
+        2 ** 10
+        
+        Never use this tool for:
+        - current time
+        - current date
+        - day
+        - month
+        - year
+        - banking questions
+        - system questions
         """,
         "handler": calculate
     },
     {
         "name": "system_tool",
         "description": """
-        Get current date, time,
-        current day,
-        month,
-        year,
-        python version,
-        operating system.
+        Retrieve information from the local computer.
+        Use this tool whenever the user asks about:
+        - current time
+        - current date
+        - today's day
+        - month
+        - year
+        - python version
+        - operating system
+        
+        This includes questions like:
+        
+        - What time is it?
+        - What's the time?
+        - Time now
+        - Current time
+        - Tell me the time
+        - What day is today?
+        
+        Never use this tool for:
+        
+        - arithmetic
+        - banking questions
         """,
         "handler": get_system_info
     }
