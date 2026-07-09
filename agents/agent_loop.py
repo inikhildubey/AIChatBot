@@ -1,3 +1,4 @@
+import asyncio
 import json
 import ollama
 
@@ -200,55 +201,84 @@ def decide_action(query: str) -> dict:
     tool_text = ""
     for tool in TOOLS:
         tool_text += f"""
-        Tool: {tool["name"]}
+        Tool: {tool}
         
         Description:
-        {tool["description"]}
-"""
+        {TOOLS[tool]["description"]}
+    """
 
     prompt = f"""
-        You are the Planner of an AI Agent.
-        Your ONLY responsibility is to decide which tool should execute the user's request.
-        
-        You MUST NOT:
-        - Answer the user's question.
-        - Rewrite the user's query.
-        - Generate mathematical expressions.
-        - Summarize documents.
-        - Execute calculations.
-        - Explain your reasoning.
-        
-        Available Tools:
-        
-        {tool_text}
-        
-        Instructions:
-        1. Read the user's request.
-        2. Choose the SINGLE best tool.
-        3. Return ONLY valid JSON.
-        4. Never return explanations.
-        5. Never return markdown.
-        
-        If the request is only a greeting, return:
-        
-        {{
-            "action":"direct_answer",
-            "answer":"Hello! How can I help you?"
-        }}
-        
-        Otherwise return:
-        
-        {{
-            "action":"tool",
-            "tool":"<tool_name>",
-            "query":"{query}"
-        }}
-        
-        User Request:
-        
-        {query}
-       """
+    You are the Planner of an AI Agent.
 
+    Your ONLY responsibility is to create an execution plan.
+
+    You MUST NOT:
+
+    - Answer the user's question.
+    - Solve mathematical expressions.
+    - Search documents.
+    - Retrieve system information.
+    - Explain your reasoning.
+    - Return markdown.
+
+    Available Tools:
+
+    {tool_text}
+
+    Instructions:
+
+    1. Read the user's request carefully.
+    2. Break the request into one or more independent tasks.
+    3. Select the most appropriate tool for each task.
+    4. Preserve the user's intent.
+    5. Return ONLY valid JSON.
+    6. Never return explanations or additional text.
+
+    Output Format:
+
+    Always return a JSON object with a "tasks" array.
+
+    Single Task Example:
+
+    {{
+        "tasks":[
+            {{
+                "tool":"search_banking_docs",
+                "query":"What is CRR?"
+            }}
+        ]
+    }}
+
+    Multiple Task Example:
+
+    {{
+        "tasks":[
+            {{
+                "tool":"search_banking_docs",
+                "query":"What is CRR?"
+            }},
+            {{
+                "tool":"system_tool",
+                "query":"What time is it?"
+            }}
+        ]
+    }}
+
+    Calculator Example:
+
+    {{
+        "tasks":[
+            {{
+                "tool":"calculator",
+                "query":"Multiply twenty five by thirty"
+            }}
+        ]
+    }}
+
+    User Request:
+
+    {query}
+    """
     response = ollama.chat(
         model="llama3",
         messages=[
@@ -283,26 +313,63 @@ def decide_action(query: str) -> dict:
 
         raise ValueError("Planner returned invalid JSON.")
 
+
 async def run_agent(query):
     decision = decide_action(query)
-
     print(decision)
-
-    if decision["action"] == "direct_answer":
+    # if decision["action"] == "direct_answer":
+    #     return {
+    #         "answer": decision["answer"]
+    #     }
+    # if decision["action"] == "tool":
+    #     tool_handler = None
+    #     for tool in TOOLS:
+    #         if tool['name'] == decision["tool"]:
+    #             tool_handler = tool['handler']
+    #
+    #     if tool_handler is None:
+    #         return {
+    #             "error": f"Unknown tool: {decision['tool']}"
+    #         }
+    #     result = await tool_handler(decision)
+    #     return result
+    if not decision['tasks']:
         return {
-            "answer": decision["answer"]
+            "error": f"Tool not available or Unknown tool: {decision['tool']}"
         }
+    jobs = []
+    for task in decision['tasks']:
+        if not task['tool']:
+            return "Unknown tool"
+        # handler = None
+        # import pdb
+        # pdb.set_trace()
+        # for tool in TOOLS:
+        #     if tool == task["tool"]:
+        #         handler = TOOLS[tool]['handler']
+        #         jobs.append(handler(task))
+        #         break
+        tool = task["tool"]
+        handler = TOOLS[tool]['handler']
+        jobs.append(handler(task))
 
-    if decision["action"] == "tool":
-        tool_handler = None
-        for tool in TOOLS:
-            if tool['name'] == decision["tool"]:
-                tool_handler = tool['handler']
-
-        if tool_handler is None:
+        if handler is None:
             return {
-                "error": f"Unknown tool: {decision['tool']}"
+                "error": f"Unknown tool: {task['tool']}"
             }
-        result = await tool_handler(decision)
-        return result
 
+    results = await asyncio.gather(*jobs)
+    return combine_results(results)
+
+
+def combine_results(results):
+    if len(results) == 1:
+        return results[0]
+
+    answers = []
+
+    for result in results:
+        answers.append(result["answer"])
+    return {
+        "answer": " And ".join(str(x) for x in answers)
+    }
