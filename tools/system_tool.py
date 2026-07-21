@@ -7,7 +7,7 @@ async def get_system_info(decision):
 
     if "time" in query:
         return {
-            "answer": f'Time is{datetime.now().strftime("%H:%M:%S")}'
+            "answer": f'Time is {datetime.now().strftime("%H:%M:%S")}'
         }
 
     if "date" in query:

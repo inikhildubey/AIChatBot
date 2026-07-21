@@ -3,6 +3,8 @@ import json
 import ollama
 
 from agents.tool_registry import TOOLS
+from memory.memory_service import *
+from memory.redis_memory import save_turn
 from tools.calculator_tool import calculate
 from tools.rag_tool import ask_question
 
@@ -197,7 +199,7 @@ from tools.rag_tool import ask_question
 #             "answer": content
 #         }
 
-def decide_action(query: str) -> dict:
+def decide_action(query: str, conversation_history: list) -> dict:
     tool_text = ""
     for tool in TOOLS:
         tool_text += f"""
@@ -206,14 +208,12 @@ def decide_action(query: str) -> dict:
         Description:
         {TOOLS[tool]["description"]}
     """
-
     prompt = f"""
     You are the Planner of an AI Agent.
 
     Your ONLY responsibility is to create an execution plan.
 
     You MUST NOT:
-
     - Answer the user's question.
     - Solve mathematical expressions.
     - Search documents.
@@ -225,57 +225,202 @@ def decide_action(query: str) -> dict:
 
     {tool_text}
 
-    Instructions:
+    Planning Responsibilities:
 
-    1. Read the user's request carefully.
-    2. Break the request into one or more independent tasks.
-    3. Select the most appropriate tool for each task.
-    4. Preserve the user's intent.
-    5. Return ONLY valid JSON.
-    6. Never return explanations or additional text.
+    1. Read the current user request carefully.
+    2. Use the previous conversation to understand the user's intent.
+    3. If the current request contains references to previous messages, resolve those references.
+    4. Rewrite incomplete or conversational requests into complete standalone queries.
+    5. Break the request into one or more independent tasks.
+    6. Select the most appropriate tool for each task.
+    7. Preserve the user's original intent.
+    8. Return ONLY valid JSON.
 
-    Output Format:
+    Reference Resolution Rules:
 
-    Always return a JSON object with a "tasks" array.
+    The current request may contain references such as:
 
-    Single Task Example:
+    - it
+    - this
+    - that
+    - these
+    - those
+    - they
+    - them
+    - previous answer
+    - full form
+    - values
+    - compare
+    - difference
+    - explain it
+    - explain this
+    - summarize it
+    - tell me more
+
+    When such references exist:
+
+    - Use the previous conversation to determine what the user is referring to.
+    - Rewrite the task query into a complete standalone query.
+    - Never leave ambiguous words like "it", "this", or "that" inside the generated task query if they can be resolved.
+
+    Examples
+
+    Example 1
+
+    Previous Conversation
+
+    User:
+    What is RTGS?
+
+    Assistant:
+    RTGS stands for Real Time Gross Settlement.
+
+    Current User Request
+
+    What is the full form?
+
+    Expected Output
 
     {{
-        "tasks":[
+        "tasks": [
             {{
-                "tool":"search_banking_docs",
-                "query":"What is CRR?"
+                "tool": "search_banking_docs",
+                "query": "What is the full form of RTGS?"
             }}
         ]
     }}
 
-    Multiple Task Example:
+    --------------------------------------------------
+
+    Example 2
+
+    Previous Conversation
+
+    User:
+    What is RTGS?
+
+    Assistant:
+    RTGS stands for Real Time Gross Settlement.
+
+    Current User Request
+
+    this vs NEFT
+
+    Expected Output
 
     {{
-        "tasks":[
+        "tasks": [
             {{
-                "tool":"search_banking_docs",
-                "query":"What is CRR?"
-            }},
-            {{
-                "tool":"system_tool",
-                "query":"What time is it?"
+                "tool": "search_banking_docs",
+                "query": "Compare RTGS and NEFT."
             }}
         ]
     }}
 
-    Calculator Example:
+    --------------------------------------------------
+
+    Example 3
+
+    Previous Conversation
+
+    User:
+    26 + 97
+
+    Assistant:
+    123
+
+    Current User Request
+
+    What are the values?
+
+    Expected Output
 
     {{
-        "tasks":[
+        "tasks": [
             {{
-                "tool":"calculator",
-                "query":"Multiply twenty five by thirty"
+                "tool": "calculator",
+                "query": "What are the values in the expression 26 + 97?"
             }}
         ]
     }}
 
-    User Request:
+    --------------------------------------------------
+
+    Example 4
+
+    Current User Request
+
+    What is CRR?
+
+    Expected Output
+
+    {{
+        "tasks": [
+            {{
+                "tool": "search_banking_docs",
+                "query": "What is CRR?"
+            }}
+        ]
+    }}
+
+    --------------------------------------------------
+
+    Example 5
+
+    Current User Request
+
+    Multiply twenty five by thirty
+
+    Expected Output
+
+    {{
+        "tasks": [
+            {{
+                "tool": "calculator",
+                "query": "Multiply twenty five by thirty"
+            }}
+        ]
+    }}
+
+    --------------------------------------------------
+
+    Example 6
+
+    Current User Request
+
+    What time is it?
+
+    Expected Output
+
+    {{
+        "tasks": [
+            {{
+                "tool": "system_tool",
+                "query": "What time is it?"
+            }}
+        ]
+    }}
+
+    Output Format
+
+    Always return ONLY a valid JSON object.
+
+    Example
+
+    {{
+        "tasks": [
+            {{
+                "tool": "search_banking_docs",
+                "query": "What is CRR?"
+            }}
+        ]
+    }}
+
+    Previous Conversation:
+
+    {conversation_history}
+
+    Current User Request:
 
     {query}
     """
@@ -315,7 +460,13 @@ def decide_action(query: str) -> dict:
 
 
 async def run_agent(query):
-    decision = decide_action(query)
+    turn = {"user": query}
+    planning_context = get_planning_context(query)
+
+    decision = decide_action(
+        query=query,
+        conversation_history=planning_context
+    )
     print(decision)
     # if decision["action"] == "direct_answer":
     #     return {
@@ -350,7 +501,12 @@ async def run_agent(query):
         #         jobs.append(handler(task))
         #         break
         tool = task["tool"]
-        handler = TOOLS[tool]['handler']
+        tool_info = TOOLS.get(tool)
+        if tool_info is None:
+            return {
+                "error": f"Unknown tool: {tool}"
+            }
+        handler = tool_info['handler']
         jobs.append(handler(task))
 
         if handler is None:
@@ -359,7 +515,10 @@ async def run_agent(query):
             }
 
     results = await asyncio.gather(*jobs)
-    return combine_results(results)
+    full_result = combine_results(results)
+    turn['assistant'] = full_result["answer"]
+    save_turn(turn)
+    return full_result
 
 
 def combine_results(results):
