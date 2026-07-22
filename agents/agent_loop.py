@@ -5,6 +5,7 @@ import ollama
 from agents.tool_registry import TOOLS
 from memory.memory_service import *
 from memory.redis_memory import save_turn
+from models.planner import PlannerResponse
 from tools.calculator_tool import calculate
 from tools.rag_tool import ask_question
 
@@ -199,7 +200,7 @@ from tools.rag_tool import ask_question
 #             "answer": content
 #         }
 
-def decide_action(query: str, conversation_history: list) -> dict:
+def decide_action(query: str, conversation_history: list) -> PlannerResponse:
     tool_text = ""
     for tool in TOOLS:
         tool_text += f"""
@@ -440,22 +441,19 @@ def decide_action(query: str, conversation_history: list) -> dict:
     content = response["message"]["content"]
 
     try:
-        decision = json.loads(content)
-
+        decision_json = json.loads(content)
+        decision = PlannerResponse(**decision_json)
         print("=" * 60)
         print("Planner Query    :", query)
         print("Planner Decision :", decision)
         print("=" * 60)
-
         return decision
 
     except json.JSONDecodeError:
-
         print("=" * 60)
         print("Planner returned invalid JSON")
         print(content)
         print("=" * 60)
-
         raise ValueError("Planner returned invalid JSON.")
 
 
@@ -484,13 +482,13 @@ async def run_agent(query):
     #         }
     #     result = await tool_handler(decision)
     #     return result
-    if not decision['tasks']:
+    if not decision.tasks:
         return {
             "error": f"Tool not available or Unknown tool: {decision['tool']}"
         }
     jobs = []
-    for task in decision['tasks']:
-        if not task['tool']:
+    for task in decision.tasks:
+        if not task.tool:
             return "Unknown tool"
         # handler = None
         # import pdb
@@ -500,14 +498,14 @@ async def run_agent(query):
         #         handler = TOOLS[tool]['handler']
         #         jobs.append(handler(task))
         #         break
-        tool = task["tool"]
+        tool = task.tool
         tool_info = TOOLS.get(tool)
         if tool_info is None:
             return {
                 "error": f"Unknown tool: {tool}"
             }
         handler = tool_info['handler']
-        jobs.append(handler(task))
+        jobs.append(handler(task.model_dump()))
 
         if handler is None:
             return {
