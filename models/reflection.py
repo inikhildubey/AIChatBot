@@ -1,3 +1,4 @@
+# models/reflection.py
 from pydantic import BaseModel
 from typing import Optional
 from enum import Enum
@@ -13,7 +14,6 @@ class ReflectionStatus(str, Enum):
 
 
 class ReflectionResponse(BaseModel):
-    loop_complete: bool
     status: ReflectionStatus
     response: Optional[str] = None
     reason: Optional[str] = None

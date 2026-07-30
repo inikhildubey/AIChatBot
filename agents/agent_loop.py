@@ -1,204 +1,19 @@
+# agents/agent_loop.py
+
 import asyncio
 import json
 import ollama
 
 from agents.tool_registry import TOOLS
-from memory.memory_service import *
+from memory.memory_service import get_planning_context
 from memory.redis_memory import save_turn
 from models.planner import PlannerResponse
-from tools.calculator_tool import calculate
-from tools.rag_tool import ask_question
+from models.reflection import ReflectionStatus
+from models.task import Task
+from services.reflection_service import reflect
 
+MAX_RETRIES = 3
 
-# def decide_action(query):
-#     tool_text = ""
-#
-#     for tool in TOOLS:
-#         tool_text += f"""
-#         Tool: {tool['name']}
-#         Description: {tool['description']}
-#         """
-#     print("Tool text:-", tool_text)
-#     prompt = f"""
-#                     You are a JSON routing engine.
-#                     Your ONLY responsibility is to classify the user's request.
-#
-#                     You are NOT an assistant.
-#                     You are NOT allowed to answer the user's question.
-#
-#                     You must decide whether to:
-#
-#                     1. Return a direct greeting.
-#                     2. Use one tool.
-#                     3. Use multiple tools.
-#                     4. Check if tools are not available to solve the problem and if question is related to
-#                     greetings then only you will be allowed to response by yourself.
-#
-#                     Return exactly ONE valid JSON object.
-#
-#                     Rules:
-#                     - Never explain your reasoning.
-#                     - Never add text before or after the JSON.
-#                     - Never use markdown.
-#                     - Your response must start with '{' and end with '}'.
-#
-#
-#                     Output format along with Tools Examples:
-#                     === Banking Tool ===
-#                     User: What is CRR?
-#
-#                     {{
-#                       "action":"tool",
-#                       "tool":"search_banking_docs",
-#                       "query":"What is CRR?"
-#                     }}
-#
-#                     === Calculator Tool ===
-#
-#                     Purpose:
-#                     Convert mathematical questions into valid Python mathematical expressions.
-#
-#                     Rules:
-#
-#                     - Return ONLY a valid Python mathematical expression.
-#                     - Use:
-#                       + - * / % ** // ()
-#                     - Convert words into numbers.
-#                     - Preserve operator precedence.
-#                     - Do not explain the calculation.
-#
-#                     User: What is 2 + 2?
-#                     User: What is the sum of 2 and 2?
-#                     User: Add 2 and 2.
-#                     User: Addition 2 and 2.
-#
-#                     {{
-#                       "action":"tool",
-#                       "tool":"calculator",
-#                       "expression":"2+2"
-#                     }}
-#
-#
-#                     User: Calculate 25 * 30
-#                     User: Multiply twenty five by thirty.
-#                     User: What is twenty five times thirty?
-#                     User: Product of 25 and 30.
-#                     User: 25 multiplied by 30.
-#                     User: Find multiplication of twenty five and thirty.
-#
-#
-#                     {{
-#                       "action":"tool",
-#                       "tool":"calculator",
-#                       "expression":"25*30"
-#                     }}
-#
-#                     User: What is (3+((25+5)*3)) ?
-#
-#                     {{
-#                         "action":"tool",
-#                         "tool":"calculator",
-#                         "expression":"(3+((25+5)*3))"
-#                     }}
-#
-#                     User: What is the remainder when 24 is divided by 5?
-#
-#                     {{
-#                         "action":"tool",
-#                         "tool":"calculator",
-#                         "expression":"24%5"
-#                     }}
-#
-#                     User: What is Square of 25.
-#
-#                     {{
-#                         "action":"tool",
-#                         "tool":"calculator",
-#                         "expression":""25**2""
-#                     }}
-#
-#                     User: Subtract twenty from one hundred and divide by four.
-#
-#                     {{
-#                         "action":"tool",
-#                         "tool":"calculator",
-#                         "expression":"(100-20)/4"
-#                     }}
-#
-#                     === System Tool ===
-#                     User:
-#                     What time is it?
-#
-#                     {{
-#                         "action":"tool",
-#                         "tool":"system_tool",
-#                         "query":"What time is it?"
-#                     }}
-#
-#                     User:
-#                     What day is today?
-#
-#                     {{
-#                             "action": "tool",
-#                             "tool": "system_tool",
-#                             "query": "What day is today?"
-#                     }}
-#
-#                     === Greeting ===
-#
-#                     Purpose:
-#                     Identify greetings.
-#
-#                     Rules:
-#                     - Greetings MUST NOT use any tool.
-#                     - Return action="direct_answer".
-#                     - Do not classify greetings as calculator, banking, or system_tool.
-#
-#                     Examples:
-#
-#                     Hi
-#                     Hello
-#                     Hey
-#                     Hello!
-#                     Hello?
-#                     Hi?
-#                     Good Morning
-#                     Good Evening
-#                     How are you?
-#
-#                     {{
-#                         "action":"direct_answer",
-#                         "answer":"Hello! How can I help you?"
-#                     }}
-#
-#
-#                     User Question:
-#                     {query}
-#                     """
-#     print("Query:-",query)
-#     response = ollama.chat(
-#         model="llama3",
-#         messages=[
-#             {
-#                 "role": "user",
-#                 "content": prompt
-#             }
-#         ],
-#         options={
-#             "temperature": 0
-#         }
-#     )
-#     content = response["message"]["content"]
-#     try:
-#         decision = json.loads(content)
-#         return decision
-#     except Exception as e:
-#         print("JSON Parse Error:", e)
-#         print(content)
-#         return {
-#             "action": "direct_answer",
-#             "answer": content
-#         }
 
 def decide_action(query: str, conversation_history: list) -> PlannerResponse:
     tool_text = ""
@@ -457,65 +272,188 @@ def decide_action(query: str, conversation_history: list) -> PlannerResponse:
         raise ValueError("Planner returned invalid JSON.")
 
 
+# async def run_agent(query):
+#     turn = {"user": query}
+#
+#     planning_context = get_planning_context(query)
+#
+#     decision = decide_action(
+#         query=query,
+#         conversation_history=planning_context
+#     )
+#
+#     if not decision.tasks:
+#         return {
+#             "error": "Planner returned no tasks."
+#         }
+#
+#     retry_count = 0
+#     current_tasks = decision.tasks
+#     MAX_RETRIES = 3
+#
+#     while True:
+#
+#         jobs = []
+#
+#         for task in current_tasks:
+#
+#             tool_info = TOOLS.get(task.tool)
+#
+#             if tool_info is None:
+#                 return {
+#                     "error": f"Unknown tool: {task.tool}"
+#                 }
+#
+#             handler = tool_info["handler"]
+#
+#             if handler is None:
+#                 return {
+#                     "error": f"Handler not available for tool: {task.tool}"
+#                 }
+#
+#             jobs.append(
+#                 handler(task.model_dump())
+#             )
+#
+#         results = await asyncio.gather(*jobs)
+#
+#         reflections = []
+#         for task, result in zip(current_tasks, results):
+#             reflection = reflect(
+#                 task=task,
+#                 result=result
+#             )
+#             reflections.append(reflection)
+#
+#         print("=" * 60)
+#         print("Reflection:", reflections)
+#         print("=" * 60)
+#         full_result = combine_results(reflections)
+#
+#         if reflection.status == ReflectionStatus.COMPLETE:
+#             turn["assistant"] = full_result["answer"]
+#             save_turn(turn)
+#             return full_result
+#
+#         elif reflection.status == ReflectionStatus.WAITING:
+#             turn["assistant"] = reflection.response
+#             save_turn(turn)
+#             return {
+#                 "answer": reflection.response
+#             }
+#
+#         elif reflection.status == ReflectionStatus.RETRY:
+#             if retry_count >= MAX_RETRIES:
+#                 return {"error": "Maximum retry attempts reached."}
+#             if reflection.next_task is None:
+#                 return {"error": "Reflection requested retry but did not provide next_task."}
+#             retry_count += 1
+#             reflection.next_task.retry_count = retry_count
+#             current_tasks = [reflection.next_task]
+#
+#         elif reflection.status == ReflectionStatus.ACTION_NEEDED:
+#             if reflection.next_task is None:
+#                 return {"error": "Reflection requested another action but did not provide next_task."}
+#             current_tasks = [reflection.next_task]
+#
+#         else:
+#             return {"error": f"Unknown reflection status: {reflection.status}"}
+
+
+async def execute_tool(task: Task):
+    tool_info = TOOLS.get(task.tool)
+
+    if tool_info is None:
+        return {
+            "error": f"Unknown tool: {task.tool}"
+        }
+
+    handler = tool_info.get("handler")
+
+    if handler is None:
+        return {
+            "error": f"Handler not available for tool: {task.tool}"
+        }
+
+    return await handler(task.model_dump())
+
+
+async def process_task(task: Task):
+    while True:
+
+        result = await execute_tool(task)
+
+        reflection = reflect(
+            task=task,
+            result=result
+        )
+
+        if reflection.status == ReflectionStatus.COMPLETE:
+            return result
+
+        elif reflection.status == ReflectionStatus.WAITING:
+            return {
+                "answer": reflection.response
+            }
+
+        elif reflection.status == ReflectionStatus.RETRY:
+
+            if task.retry_count >= MAX_RETRIES:
+                return {
+                    "error": "Maximum retry attempts reached."
+                }
+
+            if reflection.next_task is None:
+                return {
+                    "error": "Reflection requested retry but did not provide next_task."
+                }
+
+            reflection.next_task.retry_count = task.retry_count + 1
+            task = reflection.next_task
+            continue
+
+        elif reflection.status == ReflectionStatus.ACTION_NEEDED:
+
+            if reflection.next_task is None:
+                return {
+                    "error": "Reflection requested another action but did not provide next_task."
+                }
+
+            task = reflection.next_task
+            continue
+
+        return {
+            "error": f"Unknown reflection status: {reflection.status}"
+        }
+
+
 async def run_agent(query):
     turn = {"user": query}
+
     planning_context = get_planning_context(query)
 
     decision = decide_action(
         query=query,
         conversation_history=planning_context
     )
-    print(decision)
-    # if decision["action"] == "direct_answer":
-    #     return {
-    #         "answer": decision["answer"]
-    #     }
-    # if decision["action"] == "tool":
-    #     tool_handler = None
-    #     for tool in TOOLS:
-    #         if tool['name'] == decision["tool"]:
-    #             tool_handler = tool['handler']
-    #
-    #     if tool_handler is None:
-    #         return {
-    #             "error": f"Unknown tool: {decision['tool']}"
-    #         }
-    #     result = await tool_handler(decision)
-    #     return result
+
     if not decision.tasks:
         return {
-            "error": f"Tool not available or Unknown tool: {decision['tool']}"
+            "error": "Planner returned no tasks."
         }
-    jobs = []
-    for task in decision.tasks:
-        if not task.tool:
-            return "Unknown tool"
-        # handler = None
-        # import pdb
-        # pdb.set_trace()
-        # for tool in TOOLS:
-        #     if tool == task["tool"]:
-        #         handler = TOOLS[tool]['handler']
-        #         jobs.append(handler(task))
-        #         break
-        tool = task.tool
-        tool_info = TOOLS.get(tool)
-        if tool_info is None:
-            return {
-                "error": f"Unknown tool: {tool}"
-            }
-        handler = tool_info['handler']
-        jobs.append(handler(task.model_dump()))
 
-        if handler is None:
-            return {
-                "error": f"Unknown tool: {task['tool']}"
-            }
+    results = await asyncio.gather(
+        *[
+            process_task(task)
+            for task in decision.tasks
+        ]
+    )
 
-    results = await asyncio.gather(*jobs)
     full_result = combine_results(results)
-    turn['assistant'] = full_result["answer"]
+
+    turn["assistant"] = full_result["answer"]
     save_turn(turn)
+
     return full_result
 
 
